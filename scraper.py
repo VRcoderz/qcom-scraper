@@ -14,70 +14,194 @@ from urllib.parse import urljoin, urlparse
 import re
 import os
 from typing import List, Dict, Optional
-import csv
+import argparse
+from collections import defaultdict
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class QuickCommerceNewsScraper:
-    def __init__(self):
+    def __init__(self, timeframe='7d'):
         self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
+        
+        # Timeframe configuration
+        self.timeframe = timeframe
+        self.timeframe_options = {
+            '6h': {'hours': 6, 'description': 'Last 6 hours'},
+            '12h': {'hours': 12, 'description': 'Last 12 hours'},
+            '24h': {'hours': 24, 'description': 'Last 24 hours'},
+            '2d': {'days': 2, 'description': 'Last 2 days'},
+            '3d': {'days': 3, 'description': 'Last 3 days'},
+            '7d': {'days': 7, 'description': 'Last week'},
+            '14d': {'days': 14, 'description': 'Last 2 weeks'},
+            '30d': {'days': 30, 'description': 'Last month'},
+            '60d': {'days': 60, 'description': 'Last 2 months'},
+            '90d': {'days': 90, 'description': 'Last 3 months'},
+            'custom': {'days': None, 'description': 'Custom date range'}
+        }
+        
+        self.start_date, self.end_date = self._calculate_timeframe()
         
         # Enhanced quick commerce related keywords for Indian market
         self.keywords = [
             'quick commerce', 'q-commerce', 'quick-commerce', 'qcommerce',
             'blinkit', 'zepto', 'swiggy instamart', 'instamart', 'swiggy instant',
             'amazon now', 'flipkart minutes', 'myntra rapid', 'bigbasket now',
-            'dunzo', 'grofers', 'milk basket', 'nature\'s basket express',
-            'fresh to home instant', 'licious express', 'country delight rapid',
+            'dunzo', 'grofers', 'milk basket', 'fresh to home instant',
             'gopuff', 'getir', 'gorillas', 'flink', 'jokr', 'weezy',
             'ultra fast delivery', '10 minute delivery', '15 minute delivery', '30 minute delivery',
             'instant grocery', 'instant delivery', 'rapid delivery', 'express delivery',
             'dark store', 'dark stores', 'micro fulfillment', 'micro-fulfillment',
             'on-demand delivery', 'hyperlocal delivery', 'last mile delivery',
-            'grocery delivery', 'food delivery instant', 'medicine delivery instant',
-            'delivery hero', 'talabat', 'foodpanda instant', 'ubereats instant',
-            'gojek instant', 'grab instant', 'ola instant', 'rapido instant'
+            'grocery delivery', 'food delivery instant', 'medicine delivery instant'
         ]
         
-        # News sources with RSS feeds and search URLs
+        # Comprehensive Indian news sources with search URLs and RSS feeds
         self.news_sources = {
-            'TechCrunch': {
-                'search_url': 'https://search.techcrunch.com/search?query={}&order=new',
-                'base_url': 'https://techcrunch.com'
-            },
-            'Bloomberg': {
-                'search_url': 'https://www.bloomberg.com/search?query={}&sort=time:desc',
-                'base_url': 'https://www.bloomberg.com'
-            },
-            'Reuters': {
-                'search_url': 'https://www.reuters.com/site-search/?query={}',
-                'base_url': 'https://www.reuters.com'
+            # Major Indian Business & Tech News
+            'Economic Times': {
+                'search_url': 'https://economictimes.indiatimes.com/searchresult.cms?query={}',
+                'rss_url': 'https://economictimes.indiatimes.com/rssfeedsdefault.cms',
+                'base_url': 'https://economictimes.indiatimes.com'
             },
             'Business Standard': {
                 'search_url': 'https://www.business-standard.com/search?q={}',
+                'rss_url': 'https://www.business-standard.com/rss/latest.rss',
                 'base_url': 'https://www.business-standard.com'
             },
-            'Economic Times': {
-                'search_url': 'https://economictimes.indiatimes.com/searchresult.cms?query={}',
-                'base_url': 'https://economictimes.indiatimes.com'
+            'Financial Express': {
+                'search_url': 'https://www.financialexpress.com/search/?q={}',
+                'rss_url': 'https://www.financialexpress.com/feed/',
+                'base_url': 'https://www.financialexpress.com'
             },
+            'LiveMint': {
+                'search_url': 'https://www.livemint.com/Search/Link/Keyword/{}',
+                'rss_url': 'https://www.livemint.com/rss/companies',
+                'base_url': 'https://www.livemint.com'
+            },
+            'MoneyControl': {
+                'search_url': 'https://www.moneycontrol.com/news/search/?q={}',
+                'rss_url': 'https://www.moneycontrol.com/rss/business.xml',
+                'base_url': 'https://www.moneycontrol.com'
+            },
+            
+            # Startup & Tech Focused
             'YourStory': {
                 'search_url': 'https://yourstory.com/search?q={}',
+                'rss_url': 'https://yourstory.com/feed',
                 'base_url': 'https://yourstory.com'
+            },
+            'Inc42': {
+                'search_url': 'https://inc42.com/?s={}',
+                'rss_url': 'https://inc42.com/feed/',
+                'base_url': 'https://inc42.com'
             },
             'MediaNama': {
                 'search_url': 'https://www.medianama.com/?s={}',
+                'rss_url': 'https://www.medianama.com/feed/',
                 'base_url': 'https://www.medianama.com'
+            },
+            'Entrackr': {
+                'search_url': 'https://entrackr.com/?s={}',
+                'rss_url': 'https://entrackr.com/feed/',
+                'base_url': 'https://entrackr.com'
+            },
+            
+            # Major Indian News Sites
+            'Times of India': {
+                'search_url': 'https://timesofindia.indiatimes.com/searchresult.cms?query={}',
+                'rss_url': 'https://timesofindia.indiatimes.com/rssfeedstopstories.cms',
+                'base_url': 'https://timesofindia.indiatimes.com'
+            },
+            'Hindustan Times': {
+                'search_url': 'https://www.hindustantimes.com/search?q={}',
+                'rss_url': 'https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml',
+                'base_url': 'https://www.hindustantimes.com'
+            },
+            'Indian Express': {
+                'search_url': 'https://indianexpress.com/search/?q={}',
+                'rss_url': 'https://indianexpress.com/section/business/rss/',
+                'base_url': 'https://indianexpress.com'
+            },
+            'NDTV': {
+                'search_url': 'https://www.ndtv.com/search?q={}',
+                'rss_url': 'https://feeds.feedburner.com/ndtvprofit-latest',
+                'base_url': 'https://www.ndtv.com'
+            },
+            'News18': {
+                'search_url': 'https://www.news18.com/search/?q={}',
+                'rss_url': 'https://www.news18.com/rss/business.xml',
+                'base_url': 'https://www.news18.com'
             }
         }
         
-        # Google News RSS for quick commerce
+        # Google News RSS for quick commerce with date filtering
         self.google_news_rss = "https://news.google.com/rss/search?q=quick+commerce+OR+q-commerce+OR+blinkit+OR+zepto+OR+instamart&hl=en-US&gl=US&ceid=US:en"
+
+    def _calculate_timeframe(self):
+        """Calculate start and end dates based on timeframe"""
+        end_date = datetime.now()
+        
+        if self.timeframe not in self.timeframe_options:
+            logger.warning(f"Invalid timeframe '{self.timeframe}', defaulting to '7d'")
+            self.timeframe = '7d'
+        
+        timeframe_config = self.timeframe_options[self.timeframe]
+        
+        if 'hours' in timeframe_config:
+            start_date = end_date - timedelta(hours=timeframe_config['hours'])
+        elif 'days' in timeframe_config:
+            start_date = end_date - timedelta(days=timeframe_config['days'])
+        else:
+            # Custom timeframe - can be set via environment variables
+            custom_days = int(os.getenv('CUSTOM_DAYS_BACK', 7))
+            start_date = end_date - timedelta(days=custom_days)
+        
+        return start_date, end_date
+
+    def is_article_in_timeframe(self, pub_date_str: str) -> bool:
+        """Check if article publication date is within the specified timeframe"""
+        if not pub_date_str:
+            return True  # Include articles without dates to be safe
+        
+        try:
+            # Simple date parsing without external dependencies
+            # Common formats: "Mon, 01 Jan 2024 12:00:00 GMT", "2024-01-01T12:00:00Z"
+            pub_date = None
+            
+            # Try parsing RFC 2822 format (common in RSS)
+            if 'GMT' in pub_date_str or 'UTC' in pub_date_str:
+                try:
+                    from email.utils import parsedate_to_datetime
+                    pub_date = parsedate_to_datetime(pub_date_str)
+                except:
+                    pass
+            
+            # Try ISO format
+            if pub_date is None and 'T' in pub_date_str:
+                try:
+                    pub_date_str_clean = pub_date_str.replace('Z', '+00:00')
+                    pub_date = datetime.fromisoformat(pub_date_str_clean.split('+')[0])
+                except:
+                    pass
+            
+            # If we couldn't parse, include the article
+            if pub_date is None:
+                return True
+            
+            # Make timezone naive for comparison
+            if pub_date.tzinfo is not None:
+                pub_date = pub_date.replace(tzinfo=None)
+            
+            return pub_date >= self.start_date
+            
+        except Exception as e:
+            logger.debug(f"Error parsing date '{pub_date_str}': {str(e)}")
+            return True  # Include if we can't parse the date
 
     def clean_text(self, text: str) -> str:
         """Clean and normalize text content"""
@@ -122,7 +246,7 @@ class QuickCommerceNewsScraper:
                 content_elem = soup.select_one(selector)
                 if content_elem:
                     # Get all paragraph text
-                    paragraphs = content_elem.find_all(['p', 'div'], string=True)
+                    paragraphs = content_elem.find_all(['p', 'div'])
                     content_text = []
                     for p in paragraphs:
                         text = self.clean_text(p.get_text())
@@ -156,7 +280,7 @@ class QuickCommerceNewsScraper:
             }
 
     def search_google_news(self) -> List[Dict[str, str]]:
-        """Search Google News RSS for quick commerce articles"""
+        """Search Google News RSS for quick commerce articles with timeframe filtering"""
         articles = []
         try:
             response = self.session.get(self.google_news_rss, timeout=15)
@@ -165,18 +289,24 @@ class QuickCommerceNewsScraper:
             soup = BeautifulSoup(response.content, 'xml')
             items = soup.find_all('item')
             
-            for item in items[:20]:  # Limit to 20 most recent articles
+            for item in items[:30]:  # Check more items since we're filtering by date
                 title = item.find('title')
                 link = item.find('link')
                 pub_date = item.find('pubDate')
                 description = item.find('description')
                 
                 if title and link:
+                    pub_date_str = pub_date.get_text() if pub_date else ''
+                    
+                    # Check timeframe first
+                    if not self.is_article_in_timeframe(pub_date_str):
+                        continue
+                    
                     article_data = {
                         'title': self.clean_text(title.get_text()),
                         'url': link.get_text(),
                         'source': 'Google News',
-                        'published_date': pub_date.get_text() if pub_date else '',
+                        'published_date': pub_date_str,
                         'description': self.clean_text(description.get_text()) if description else ''
                     }
                     
@@ -194,8 +324,63 @@ class QuickCommerceNewsScraper:
         
         return articles
 
-    def search_news_api(self, query: str, days_back: int = 7) -> List[Dict[str, str]]:
-        """Search using NewsAPI (requires API key)"""
+    def search_rss_feeds(self) -> List[Dict[str, str]]:
+        """Search RSS feeds from Indian news sources with timeframe filtering"""
+        articles = []
+        
+        for source_name, source_info in self.news_sources.items():
+            if 'rss_url' not in source_info:
+                continue
+                
+            try:
+                logger.info(f"Searching RSS for {source_name}...")
+                response = self.session.get(source_info['rss_url'], timeout=15)
+                response.raise_for_status()
+                
+                soup = BeautifulSoup(response.content, 'xml')
+                items = soup.find_all('item')
+                
+                for item in items[:15]:  # Check more items since we're filtering by date
+                    title = item.find('title')
+                    link = item.find('link')
+                    pub_date = item.find('pubDate')
+                    description = item.find('description')
+                    
+                    if title and link:
+                        title_text = self.clean_text(title.get_text())
+                        pub_date_str = pub_date.get_text() if pub_date else ''
+                        
+                        # Check timeframe first
+                        if not self.is_article_in_timeframe(pub_date_str):
+                            continue
+                        
+                        # Check if title contains quick commerce keywords
+                        if any(keyword.lower() in title_text.lower() for keyword in self.keywords):
+                            article_data = {
+                                'title': title_text,
+                                'url': link.get_text(),
+                                'source': source_name,
+                                'published_date': pub_date_str,
+                                'description': self.clean_text(description.get_text()) if description else ''
+                            }
+                            
+                            # Extract full content
+                            full_content = self.extract_article_content(article_data['url'])
+                            article_data['content'] = full_content['content']
+                            
+                            articles.append(article_data)
+                            
+                            # Rate limiting
+                            time.sleep(1)
+                
+            except Exception as e:
+                logger.error(f"Error searching RSS for {source_name}: {str(e)}")
+                continue
+        
+        return articles
+
+    def search_news_api(self, query: str) -> List[Dict[str, str]]:
+        """Search using NewsAPI with timeframe filtering"""
         articles = []
         api_key = os.getenv('NEWS_API_KEY')
         
@@ -204,12 +389,16 @@ class QuickCommerceNewsScraper:
             return articles
         
         try:
-            from_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
+            # Convert timeframe to NewsAPI format
+            from_date = self.start_date.strftime('%Y-%m-%d')
+            to_date = self.end_date.strftime('%Y-%m-%d')
+            
             url = f"https://newsapi.org/v2/everything"
             
             params = {
                 'q': query,
                 'from': from_date,
+                'to': to_date,
                 'sortBy': 'publishedAt',
                 'language': 'en',
                 'apiKey': api_key,
@@ -245,83 +434,78 @@ class QuickCommerceNewsScraper:
         
         return articles
 
-    def scrape_all_news(self, days_back: int = 7) -> List[Dict[str, str]]:
-        """Main method to scrape all news sources"""
+    def scrape_all_news(self) -> List[Dict[str, str]]:
+        """Main method to scrape all news sources with timeframe filtering"""
         all_articles = []
         
-        # Search Google News RSS
+        logger.info(f"Scraping news for timeframe: {self.timeframe_options[self.timeframe]['description']}")
+        logger.info(f"Date range: {self.start_date.strftime('%Y-%m-%d %H:%M')} to {self.end_date.strftime('%Y-%m-%d %H:%M')}")
+        
+        # 1. Search Indian news site RSS feeds
+        logger.info("Searching Indian news RSS feeds...")
+        rss_articles = self.search_rss_feeds()
+        all_articles.extend(rss_articles)
+        logger.info(f"Found {len(rss_articles)} articles from RSS feeds")
+        
+        # 2. Search Google News RSS
         logger.info("Searching Google News RSS...")
         google_articles = self.search_google_news()
         all_articles.extend(google_articles)
         logger.info(f"Found {len(google_articles)} articles from Google News")
         
-        # Search using NewsAPI if available
+        # 3. Search using NewsAPI if available
         logger.info("Searching NewsAPI...")
-        for keyword in ['quick commerce', 'blinkit', 'zepto', 'swiggy instamart']:
-            news_api_articles = self.search_news_api(keyword, days_back)
-            all_articles.extend(news_api_articles)
-            time.sleep(2)  # Rate limiting
+        newsapi_count = 0
+        for keyword in ['quick commerce india', 'blinkit', 'zepto', 'swiggy instamart']:
+            try:
+                news_api_articles = self.search_news_api(keyword)
+                all_articles.extend(news_api_articles)
+                newsapi_count += len(news_api_articles)
+                time.sleep(2)  # Rate limiting
+            except Exception as e:
+                logger.error(f"Error with NewsAPI for keyword '{keyword}': {str(e)}")
+                continue
         
-        logger.info(f"Found {len([a for a in all_articles if a.get('source') != 'Google News'])} articles from NewsAPI")
+        logger.info(f"Found {newsapi_count} articles from NewsAPI")
         
-        # Remove duplicates based on URL
-        seen_urls = set()
-        unique_articles = []
-        for article in all_articles:
-            if article['url'] not in seen_urls:
-                seen_urls.add(article['url'])
-                unique_articles.append(article)
+        # Remove duplicates based on URL and title similarity
+        unique_articles = self.remove_duplicates(all_articles)
         
         logger.info(f"Total unique articles found: {len(unique_articles)}")
         return unique_articles
 
-    def save_to_text_file(self, articles: List[Dict[str, str]], filename: str = None):
-        """Save articles to a text file"""
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"quick_commerce_news_{timestamp}.txt"
+    def remove_duplicates(self, articles: List[Dict[str, str]]) -> List[Dict[str, str]]:
+        """Remove duplicate articles based on URL and title similarity"""
+        seen_urls = set()
+        seen_titles = set()
+        unique_articles = []
         
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("QUICK COMMERCE INDUSTRY NEWS REPORT\n")
-            f.write("=" * 50 + "\n")
-            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Total articles: {len(articles)}\n\n")
+        for article in articles:
+            url = article.get('url', '')
+            title = article.get('title', '').lower().strip()
             
-            for i, article in enumerate(articles, 1):
-                f.write(f"\n{'='*80}\n")
-                f.write(f"ARTICLE {i}\n")
-                f.write(f"{'='*80}\n\n")
-                f.write(f"TITLE: {article.get('title', 'No title')}\n\n")
-                f.write(f"SOURCE: {article.get('source', 'Unknown')}\n\n")
-                f.write(f"URL: {article.get('url', '')}\n\n")
-                f.write(f"PUBLISHED: {article.get('published_date', 'Unknown')}\n\n")
-                
-                if article.get('description'):
-                    f.write(f"DESCRIPTION:\n{article['description']}\n\n")
-                
-                f.write(f"FULL CONTENT:\n")
-                f.write("-" * 40 + "\n")
-                f.write(f"{article.get('content', 'No content available')}\n")
-                f.write("-" * 40 + "\n\n")
+            # Skip if URL already seen
+            if url in seen_urls:
+                continue
+            
+            # Skip if very similar title already seen
+            title_words = set(title.split())
+            is_duplicate = False
+            for seen_title in seen_titles:
+                seen_words = set(seen_title.split())
+                # If more than 70% words match, consider duplicate
+                if len(title_words) > 0 and len(seen_words) > 0:
+                    overlap = len(title_words & seen_words) / max(len(title_words), len(seen_words))
+                    if overlap > 0.7:
+                        is_duplicate = True
+                        break
+            
+            if not is_duplicate:
+                seen_urls.add(url)
+                seen_titles.add(title)
+                unique_articles.append(article)
         
-        logger.info(f"Articles saved to {filename}")
-        return filename
-
-    def save_to_json(self, articles: List[Dict[str, str]], filename: str = None):
-        """Save articles to JSON file"""
-        if not filename:
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"quick_commerce_news_{timestamp}.json"
-        
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump({
-                'generated_on': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'total_articles': len(articles),
-                'articles': articles
-            }, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Articles saved to {filename}")
-        return filename
+        return unique_articles
 
     def save_to_text_file(self, articles: List[Dict[str, str]], filename: str = None):
         """Save articles to a text file with timeframe info"""
@@ -330,44 +514,48 @@ class QuickCommerceNewsScraper:
             timeframe_label = self.timeframe.replace('h', 'hours').replace('d', 'days')
             filename = f"quick_commerce_news_{timeframe_label}_{timestamp}.txt"
         
-        with open(filename, 'w', encoding='utf-8') as f:
-            f.write("QUICK COMMERCE INDUSTRY NEWS REPORT\n")
-            f.write("=" * 50 + "\n")
-            f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"Timeframe: {self.timeframe_options[self.timeframe]['description']}\n")
-            f.write(f"Date range: {self.start_date.strftime('%Y-%m-%d %H:%M')} to {self.end_date.strftime('%Y-%m-%d %H:%M')}\n")
-            f.write(f"Total articles: {len(articles)}\n\n")
-            
-            # Group articles by source for better organization
-            from collections import defaultdict
-            articles_by_source = defaultdict(list)
-            for article in articles:
-                articles_by_source[article.get('source', 'Unknown')].append(article)
-            
-            f.write("ARTICLES BY SOURCE:\n")
-            for source, source_articles in articles_by_source.items():
-                f.write(f"• {source}: {len(source_articles)} articles\n")
-            f.write("\n")
-            
-            for i, article in enumerate(articles, 1):
-                f.write(f"\n{'='*80}\n")
-                f.write(f"ARTICLE {i}\n")
-                f.write(f"{'='*80}\n\n")
-                f.write(f"TITLE: {article.get('title', 'No title')}\n\n")
-                f.write(f"SOURCE: {article.get('source', 'Unknown')}\n\n")
-                f.write(f"URL: {article.get('url', '')}\n\n")
-                f.write(f"PUBLISHED: {article.get('published_date', 'Unknown')}\n\n")
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write("QUICK COMMERCE INDUSTRY NEWS REPORT\n")
+                f.write("=" * 50 + "\n")
+                f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                f.write(f"Timeframe: {self.timeframe_options[self.timeframe]['description']}\n")
+                f.write(f"Date range: {self.start_date.strftime('%Y-%m-%d %H:%M')} to {self.end_date.strftime('%Y-%m-%d %H:%M')}\n")
+                f.write(f"Total articles: {len(articles)}\n\n")
                 
-                if article.get('description'):
-                    f.write(f"DESCRIPTION:\n{article['description']}\n\n")
+                # Group articles by source for better organization
+                articles_by_source = defaultdict(list)
+                for article in articles:
+                    articles_by_source[article.get('source', 'Unknown')].append(article)
                 
-                f.write(f"FULL CONTENT:\n")
-                f.write("-" * 40 + "\n")
-                f.write(f"{article.get('content', 'No content available')}\n")
-                f.write("-" * 40 + "\n\n")
-        
-        logger.info(f"Articles saved to {filename}")
-        return filename
+                f.write("ARTICLES BY SOURCE:\n")
+                for source, source_articles in articles_by_source.items():
+                    f.write(f"• {source}: {len(source_articles)} articles\n")
+                f.write("\n")
+                
+                for i, article in enumerate(articles, 1):
+                    f.write(f"\n{'='*80}\n")
+                    f.write(f"ARTICLE {i}\n")
+                    f.write(f"{'='*80}\n\n")
+                    f.write(f"TITLE: {article.get('title', 'No title')}\n\n")
+                    f.write(f"SOURCE: {article.get('source', 'Unknown')}\n\n")
+                    f.write(f"URL: {article.get('url', '')}\n\n")
+                    f.write(f"PUBLISHED: {article.get('published_date', 'Unknown')}\n\n")
+                    
+                    if article.get('description'):
+                        f.write(f"DESCRIPTION:\n{article['description']}\n\n")
+                    
+                    f.write(f"FULL CONTENT:\n")
+                    f.write("-" * 40 + "\n")
+                    f.write(f"{article.get('content', 'No content available')}\n")
+                    f.write("-" * 40 + "\n\n")
+            
+            logger.info(f"Articles saved to {filename}")
+            return filename
+            
+        except Exception as e:
+            logger.error(f"Error saving to text file: {str(e)}")
+            return None
 
     def save_to_json(self, articles: List[Dict[str, str]], filename: str = None):
         """Save articles to JSON file with timeframe info"""
@@ -376,25 +564,28 @@ class QuickCommerceNewsScraper:
             timeframe_label = self.timeframe.replace('h', 'hours').replace('d', 'days')
             filename = f"quick_commerce_news_{timeframe_label}_{timestamp}.json"
         
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump({
-                'generated_on': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'timeframe': self.timeframe_options[self.timeframe]['description'],
-                'date_range': {
-                    'start': self.start_date.strftime('%Y-%m-%d %H:%M:%S'),
-                    'end': self.end_date.strftime('%Y-%m-%d %H:%M:%S')
-                },
-                'total_articles': len(articles),
-                'articles': articles
-            }, f, indent=2, ensure_ascii=False)
-        
-        logger.info(f"Articles saved to {filename}")
-        return filename
+        try:
+            with open(filename, 'w', encoding='utf-8') as f:
+                json.dump({
+                    'generated_on': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    'timeframe': self.timeframe_options[self.timeframe]['description'],
+                    'date_range': {
+                        'start': self.start_date.strftime('%Y-%m-%d %H:%M:%S'),
+                        'end': self.end_date.strftime('%Y-%m-%d %H:%M:%S')
+                    },
+                    'total_articles': len(articles),
+                    'articles': articles
+                }, f, indent=2, ensure_ascii=False)
+            
+            logger.info(f"Articles saved to {filename}")
+            return filename
+            
+        except Exception as e:
+            logger.error(f"Error saving to JSON file: {str(e)}")
+            return None
 
 def parse_timeframe_argument():
     """Parse timeframe from command line arguments or environment variables"""
-    import argparse
-    
     parser = argparse.ArgumentParser(description='Quick Commerce News Scraper')
     parser.add_argument(
         '--timeframe', '-t',
@@ -414,9 +605,17 @@ def parse_timeframe_argument():
         help='List all available timeframe options'
     )
     
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        # If argument parsing fails, use defaults
+        class DefaultArgs:
+            timeframe = os.getenv('SCRAPE_TIMEFRAME', '7d')
+            custom_days = int(os.getenv('CUSTOM_DAYS_BACK', 7))
+            list_timeframes = False
+        args = DefaultArgs()
     
-    if args.list_timeframes:
+    if hasattr(args, 'list_timeframes') and args.list_timeframes:
         print("Available timeframe options:")
         scraper = QuickCommerceNewsScraper()
         for code, info in scraper.timeframe_options.items():
@@ -432,15 +631,15 @@ def parse_timeframe_argument():
 def main():
     """Main function to run the scraper with timeframe selection"""
     
-    # Parse timeframe from arguments or environment
-    timeframe = parse_timeframe_argument()
-    
-    scraper = QuickCommerceNewsScraper(timeframe=timeframe)
-    
-    logger.info(f"Starting quick commerce news scraping...")
-    logger.info(f"Timeframe: {scraper.timeframe_options[timeframe]['description']}")
-    
     try:
+        # Parse timeframe from arguments or environment
+        timeframe = parse_timeframe_argument()
+        
+        scraper = QuickCommerceNewsScraper(timeframe=timeframe)
+        
+        logger.info(f"Starting quick commerce news scraping...")
+        logger.info(f"Timeframe: {scraper.timeframe_options[timeframe]['description']}")
+        
         # Scrape all news
         articles = scraper.scrape_all_news()
         
@@ -451,17 +650,23 @@ def main():
             # Also save to JSON for structured data
             json_filename = scraper.save_to_json(articles)
             
-            print(f"\n✅ Successfully scraped {len(articles)} articles!")
-            print(f"📅 Timeframe: {scraper.timeframe_options[timeframe]['description']}")
-            print(f"📄 Text file: {text_filename}")
-            print(f"📊 JSON file: {json_filename}")
-            
+            if text_filename:
+                print(f"\n✅ Successfully scraped {len(articles)} articles!")
+                print(f"📅 Timeframe: {scraper.timeframe_options[timeframe]['description']}")
+                print(f"📄 Text file: {text_filename}")
+                if json_filename:
+                    print(f"📊 JSON file: {json_filename}")
+            else:
+                print("❌ Error saving files")
+                
         else:
             logger.warning("No articles found for the specified timeframe")
+            print("⚠️ No articles found for the specified timeframe")
             
     except Exception as e:
         logger.error(f"Error in main execution: {str(e)}")
-        raise
+        print(f"❌ Error: {str(e)}")
+        exit(1)
 
 if __name__ == "__main__":
     main()
